@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { doc, updateDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, updateDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../hooks/useAuth';
 import { useCollection } from '../hooks/useCollection';
@@ -30,19 +30,33 @@ export default function SettingsPage() {
   );
 }
 
+/* ─── MY PROFILE ─────────────────────────────────────────────────────────── */
 function MyProfile({ profile }) {
-  // Avatar holds a single emoji; strip any stray initials/digits that crept in.
   const [avatar, setAvatar] = useState((profile?.avatar || '').replace(/[A-Za-z0-9\s]/g, ''));
   const [displayName, setDisplayName] = useState(profile?.displayName || '');
   const [fullName, setFullName] = useState(profile?.fullName || profile?.displayName || '');
+  // ── NEW: payment contact fields ──
+  const [venmoHandle, setVenmoHandle] = useState(profile?.venmoHandle || '');
+  const [phone, setPhone] = useState(profile?.phone || '');
   const [saved, setSaved] = useState(false);
   const roomName = ROOMS.find(r => r.id === profile?.room)?.name;
+
+  // Keep fields in sync if profile loads after mount
+  useEffect(() => {
+    setAvatar((profile?.avatar || '').replace(/[A-Za-z0-9\s]/g, ''));
+    setDisplayName(profile?.displayName || '');
+    setFullName(profile?.fullName || profile?.displayName || '');
+    setVenmoHandle(profile?.venmoHandle || '');
+    setPhone(profile?.phone || '');
+  }, [profile?.uid]);
 
   async function save() {
     await updateDoc(doc(db, 'users', profile.uid), {
       avatar: avatar.replace(/[A-Za-z0-9\s]/g, '').trim() || '⭐',
       displayName: displayName.trim(),
       fullName: fullName.trim(),
+      venmoHandle: venmoHandle.trim().replace(/^@/, ''), // strip leading @ if they typed it
+      phone: phone.replace(/\D/g, ''),                   // digits only
     });
     setSaved(true); setTimeout(() => setSaved(false), 2500);
   }
@@ -59,6 +73,7 @@ function MyProfile({ profile }) {
           </div>
         </div>
       </div>
+
       <div className="form-group">
         <label>Display name (what everyone sees)</label>
         <input value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="e.g. Brandon N" />
@@ -75,14 +90,51 @@ function MyProfile({ profile }) {
           iPhone: tap 🌐 key · Android: emoji button · Mac: ⌘+Ctrl+Space · Windows: Win+.
         </div>
       </div>
+
+      {/* ── NEW: payment info ── */}
+      <div className="divider" />
+      <div className="info-head" style={{marginTop:0}}>💸 PAYMENT INFO</div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>
+        Used so others can pay you back directly from a receipt. Only visible to your crew.
+      </div>
+      <div className="form-group">
+        <label>Venmo username</label>
+        <input value={venmoHandle} onChange={e=>setVenmoHandle(e.target.value)}
+          placeholder="e.g. brandon-Nwokocha (without the @)" />
+        {venmoHandle ? (
+          <div style={{fontSize:11,color:'var(--sage)',marginTop:3}}>
+            ✓ Venmo link: venmo.com/{venmoHandle.replace(/^@/,'')}
+          </div>
+        ) : (
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>
+            Add your Venmo so others can pay you with one tap.
+          </div>
+        )}
+      </div>
+      <div className="form-group">
+        <label>Phone number (for Apple Cash via iMessage)</label>
+        <input value={phone} onChange={e=>setPhone(e.target.value)}
+          placeholder="e.g. 4696930889" type="tel" />
+        {phone ? (
+          <div style={{fontSize:11,color:'var(--sage)',marginTop:3}}>
+            ✓ Apple Cash payments will open Messages to {phone}
+          </div>
+        ) : (
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>
+            Add your number so others can send you Apple Cash directly.
+          </div>
+        )}
+      </div>
+
       <button className="btn btn-primary" onClick={save}>{saved ? 'Saved! ✓' : 'Save changes'}</button>
       <NotificationsToggle uid={profile?.uid} />
     </div>
   );
 }
 
+/* ─── NOTIFICATIONS TOGGLE (unchanged) ───────────────────────────────────── */
 function NotificationsToggle({ uid }) {
-  const [state, setState] = useState('loading'); // loading|on|off|denied|needs-install|unsupported
+  const [state, setState] = useState('loading');
   const [busy, setBusy] = useState(false);
   useEffect(() => { pushState().then(setState); }, []);
 
@@ -132,6 +184,7 @@ function NotificationsToggle({ uid }) {
   );
 }
 
+/* ─── TRAVEL TAB (unchanged) ─────────────────────────────────────────────── */
 function TravelTab({ kind, users, profile, isAdmin }) {
   const [editUid, setEditUid] = useState(null);
   const [form, setForm] = useState({});
@@ -162,7 +215,6 @@ function TravelTab({ kind, users, profile, isAdmin }) {
   }
 
   async function save(uid) {
-    // REQUIRED DATE VALIDATION
     if (!form.dateRaw) {
       setError(kind==='arr' ? '⚠️ Arrival date missing — date is required to save.' : '⚠️ Departure date is required to save.');
       return;
@@ -208,7 +260,8 @@ function TravelTab({ kind, users, profile, isAdmin }) {
                 {flight && needsFlight(mode) && (
                   <div style={{fontSize:11,marginTop:2}}>
                     ✈ {flight} ·{' '}
-                    <a href={`https://www.google.com/search?q=flight+${encodeURIComponent(flight)}+status`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{color:'var(--ocean)'}}>status ↗</a>
+                    <a href={`https://www.google.com/search?q=flight+${encodeURIComponent(flight)}+status`}
+                      target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{color:'var(--ocean)'}}>status ↗</a>
                   </div>
                 )}
                 {ferry && needsFerry(mode) && <div style={{fontSize:11,marginTop:2}}>⛴ {ferry}</div>}
@@ -260,15 +313,50 @@ function TravelTab({ kind, users, profile, isAdmin }) {
   );
 }
 
+/* ─── ADMIN TAB ──────────────────────────────────────────────────────────── */
 const EXPORT_COLLECTIONS = ['users','events','ideas','meals','receipts','bulletins','groceries','infoCustom','payments','config'];
+
+// ── NEW: seed data — phone numbers + Venmo handles for the crew
+// Keyed by email so it works regardless of UID
+const CONTACT_SEED = {
+  'bnwokocha@gmail.com':       { phone: '4696930889', venmoHandle: 'brandon-Nwokocha' },
+  // Add crew emails below — update if they sign up with different emails
+  // These are matched by email address on the user doc
+};
+// Venmo handles by display name as fallback (in case email isn't stored)
+const VENMO_BY_NAME = {
+  'Brandon N':   'brandon-Nwokocha',
+  'Jace':        'Jace-fowl-13',
+  'Jace Fowler': 'Jace-fowl-13',
+  'Evan':        'evan-mcanulty',
+  'Evan McAnulty':'evan-mcanulty',
+  'Brandon B':   'brandon-berryman-31',
+  'Brandon Berryman':'brandon-berryman-31',
+  'Chris':       'chris-ladeau',
+  'Chris Ladeau':'chris-ladeau',
+};
+const PHONE_BY_NAME = {
+  'Brandon N':    '4696930889',
+  'Brandon Nwokocha':'4696930889',
+  'Jace':         '9797774992',
+  'Jace Fowler':  '9797774992',
+  'Evan':         '7133151419',
+  'Evan McAnulty':'7133151419',
+  'Brandon B':    '8324838423',
+  'Brandon Berryman':'8324838423',
+  'Chris':        '9512104084',
+  'Chris Ladeau': '9512104084',
+};
 
 function AdminTab({ users, profile }) {
   const [exporting, setExporting] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [seedDone, setSeedDone] = useState(false);
+
   async function toggleAdmin(uid, cur) { await updateDoc(doc(db,'users',uid), { admin: !cur }); }
   async function toggleAccountant(uid, cur) { await updateDoc(doc(db,'users',uid), { accountant: !cur }); }
   async function approve(uid) { await updateDoc(doc(db,'users',uid), { approved: true }); }
 
-  // Full-data JSON backup — Firestore free tier has no backups; this is the safety net
   async function exportAll() {
     setExporting(true);
     try {
@@ -279,11 +367,33 @@ function AdminTab({ users, profile }) {
       }
       const url = URL.createObjectURL(new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' }));
       const a = document.createElement('a');
-      a.href = url;
-      a.download = `jbbce-backup-${new Date().toISOString().slice(0,10)}.json`;
-      a.click();
+      a.href = url; a.download = `jbbce-backup-${new Date().toISOString().slice(0,10)}.json`; a.click();
       URL.revokeObjectURL(url);
     } finally { setExporting(false); }
+  }
+
+  // ── NEW: seed contact info for all existing users
+  async function seedContactInfo() {
+    if (!window.confirm('This will write phone numbers and Venmo handles for all crew members who don\'t have them yet. OK?')) return;
+    setSeeding(true);
+    try {
+      const batch = writeBatch(db);
+      let count = 0;
+      users.forEach(u => {
+        const name = u.displayName || '';
+        const venmo = u.venmoHandle || VENMO_BY_NAME[name] || '';
+        const phone = u.phone || PHONE_BY_NAME[name] || '';
+        if (venmo || phone) {
+          const upd = {};
+          if (!u.venmoHandle && venmo) upd.venmoHandle = venmo;
+          if (!u.phone && phone) upd.phone = phone;
+          if (Object.keys(upd).length) { batch.update(doc(db,'users',u.uid), upd); count++; }
+        }
+      });
+      await batch.commit();
+      setSeedDone(true);
+      setTimeout(() => setSeedDone(false), 4000);
+    } finally { setSeeding(false); }
   }
 
   const pending = users.filter(u => u.approved === false);
@@ -304,13 +414,30 @@ function AdminTab({ users, profile }) {
         </div>
       )}
 
+      {/* ── NEW: seed contact info button */}
+      <div className="tip-box" style={{marginBottom:14,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <span style={{flex:1}}>
+          📇 <b>Seed contact info</b> — writes Venmo handles and phone numbers for all crew members who don't have them yet. Tap once after everyone has signed up. Users can always update their own info in My Profile.
+        </span>
+        <button className="btn btn-secondary" disabled={seeding} onClick={seedContactInfo}>
+          {seeding ? 'Writing…' : seedDone ? '✓ Done!' : 'Seed contact info'}
+        </button>
+      </div>
+
       <div className="tip-box" style={{marginBottom:14,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
         <span style={{flex:1}}>💾 Download everything (receipts, payments, events…) as a JSON file. Do this weekly and on the last day — there are no other backups.</span>
         <button className="btn btn-secondary" disabled={exporting} onClick={exportAll}>{exporting?'Exporting…':'Export backup'}</button>
       </div>
+
       {users.filter(u => u.uid !== profile.uid).map(u => (
         <div key={u.uid} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,padding:'8px 0',borderBottom:'1px solid var(--border)',flexWrap:'wrap'}}>
-          <span style={{fontSize:16}}>{u.avatar && u.avatar!=='⭐' ? u.avatar : '👤'} {u.displayName}</span>
+          <div>
+            <span style={{fontSize:16}}>{u.avatar && u.avatar!=='⭐' ? u.avatar : '👤'} {u.displayName}</span>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>
+              {u.venmoHandle && `@${u.venmoHandle}`}{u.venmoHandle && u.phone && ' · '}{u.phone && `📱 ${u.phone}`}
+              {!u.venmoHandle && !u.phone && <span style={{color:'var(--gold)'}}>⚠️ no contact info — seed or ask them to add in profile</span>}
+            </div>
+          </div>
           <div className="btn-row">
             <button className="btn-mini" style={u.admin?{borderColor:'var(--sage)',color:'var(--sage)'}:{}}
               onClick={()=>toggleAdmin(u.uid, u.admin)}>
