@@ -24,7 +24,7 @@ export const MEAL_OPTIONS = [
   { value: 'group_event', label: '🎉 Group Event',             icon: '🎉' },
 ];
 
-export const PAYMENT_METHODS = ['Cash', 'Apple Pay', 'Favors 😈'];
+export const PAYMENT_METHODS = ['Cash', 'Venmo', 'Apple Cash', 'Favors 😈'];
 
 export const TRAVEL_MODES_ARR = [
   'Ferry (Bay State Cruises)',
