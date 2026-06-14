@@ -62,46 +62,57 @@ export default function ReceiptsPage() {
   );
 }
 
-/* ============ SETTLE UP — one net number per person instead of receipt-by-receipt math ============ */
-// Brief one-shot confetti sprinkle in the beach palette — fires when the crew is
-// all square. Renders nothing under prefers-reduced-motion.
+/* ─── CONFETTI (unchanged) ─────────────────────────────────────────────────── */
 function Confetti() {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
   const C = ['#1a6b8a', '#d4715a', '#6b8c5a', '#c8a84b', '#8a5aaa'];
   const pieces = Array.from({ length: 16 }, (_, i) => ({
-    left: (i * 6.1 + 3) % 96,
-    dl: (i % 6) * 0.05,
-    d: 0.9 + (i % 4) * 0.14,
-    color: C[i % 5],
-    r: ((i * 53) % 300 + 220) + 'deg',
-    w: i % 3 === 0 ? 9 : 6,
-    h: i % 3 === 0 ? 4 : 6,
+    left: (i * 6.1 + 3) % 96, dl: (i % 6) * 0.05, d: 0.9 + (i % 4) * 0.14,
+    color: C[i % 5], r: ((i * 53) % 300 + 220) + 'deg',
+    w: i % 3 === 0 ? 9 : 6, h: i % 3 === 0 ? 4 : 6,
   }));
   return (
     <div className="confetti-layer" aria-hidden="true">
       {pieces.map((p, i) => (
         <span key={i} className="confetti-piece"
-          style={{ left: p.left + '%', background: p.color, width: p.w, height: p.h, '--d': p.d + 's', '--dl': p.dl + 's', '--r': p.r }} />
+          style={{ left: p.left+'%', background: p.color, width: p.w, height: p.h,
+            '--d': p.d+'s', '--dl': p.dl+'s', '--r': p.r }} />
       ))}
     </div>
   );
 }
 
+/* ─── SETTLE UP ────────────────────────────────────────────────────────────── */
 function SettleUp({ receipts, users, profile, onLogPayment }) {
   const { data: costData } = useDoc('config/cost');
   const { docs: payDocs } = useCollection('payments');
   if (!profile) return null;
   const me = profile.uid;
 
-  // What I owe each uploader: even-split receipts I'm tagged in, not fully paid, nothing logged yet
-  const debts = {}; // creditorUid -> [{ r, share }]
+  // Build debts — now also account for receipts where someone else is covering me
+  const debts = {};
   let inFlight = 0;
   const manualPending = [];
+
   receipts.forEach(r => {
-    if (r.fullyPaid || r.by === me || !r.whoIds?.includes(me)) return;
+    if (r.fullyPaid || r.by === me) return;
+
+    // Am I tagged directly, OR is someone covering me (coveredUids on their payment)?
+    const directlyTagged = r.whoIds?.includes(me);
+
+    // Find if someone else said they'd cover me
+    const coveringEntry = !directlyTagged ? null : Object.entries(r.payments || {}).find(
+      ([uid, p]) => uid !== me && p.coveredUids?.includes(me) && p.confirmed
+    );
+
+    if (coveringEntry) return; // someone already confirmed they paid for me
+
+    if (!directlyTagged) return;
+
     const p = r.payments?.[me];
     if (p?.confirmed) return;
     if (p) { inFlight += p.amount || 0; return; }
+
     if (r.split === 'even' && r.whoIds.length) {
       (debts[r.by] = debts[r.by] || []).push({ r, share: r.amt / r.whoIds.length });
     } else if (r.split === 'manual') {
@@ -109,19 +120,23 @@ function SettleUp({ receipts, users, profile, onLogPayment }) {
     }
   });
 
-  // What's still owed to me across my open receipts
   const owedToMe = receipts.filter(r => r.by === me && !r.fullyPaid).reduce((sum, r) => {
     const others = (r.whoIds || []).filter(uid => uid !== me);
-    const confirmed = others.reduce((s, uid) => s + (r.payments?.[uid]?.confirmed ? (r.payments[uid].amount || 0) : 0), 0);
+    const confirmed = others.reduce((s, uid) => {
+      const p = r.payments?.[uid];
+      if (!p?.confirmed) return s;
+      // This person's payment covers themselves + any coveredUids
+      const coveredCount = 1 + (p.coveredUids?.length || 0);
+      const shareEach = r.split === 'even' ? r.amt / r.whoIds.length : 0;
+      return s + (p.amount || (shareEach * coveredCount));
+    }, 0);
     const myPortion = r.split === 'manual' ? (r.myPortion || 0) : (r.whoIds?.length ? r.amt / r.whoIds.length : 0);
     return sum + Math.max(0, (r.amt || 0) - myPortion - confirmed);
   }, 0);
 
-  // House fund balance (same math as House → Payments)
   const { owe } = calcOwed(users, costData);
   const housePaid = payDocs.find(p => p.uid === me)?.confirmed || 0;
   const houseLeft = Math.max(0, (owe[me] || 0) - housePaid);
-
   const creditorIds = Object.keys(debts);
   const totalIOwe = creditorIds.reduce((s, uid) => s + debts[uid].reduce((a, d) => a + d.share, 0), 0);
   const allSquare = !creditorIds.length && !manualPending.length && owedToMe < 0.01 && houseLeft < 0.01 && inFlight < 0.01;
@@ -178,6 +193,7 @@ function SettleUp({ receipts, users, profile, onLogPayment }) {
   );
 }
 
+/* ─── UPLOAD FORM (unchanged) ──────────────────────────────────────────────── */
 function UploadForm({ profile, users }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ desc:'', amt:'', split:'even', payMethods:[], whoIds:[], myPortion:'' });
@@ -185,7 +201,6 @@ function UploadForm({ profile, users }) {
   const [uploading, setUploading] = useState(false);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
-  // Opening the form pre-selects whoever is at the house today (by arrival/departure dates)
   function openForm() {
     if (!open && form.whoIds.length === 0) {
       const now = new Date();
@@ -221,7 +236,7 @@ function UploadForm({ profile, users }) {
         whoIds: form.whoIds.includes(profile.uid) ? form.whoIds : [...form.whoIds, profile.uid],
         by: profile.uid, byName: profile.displayName,
         imageUrl, date: new Date().toISOString(),
-        payments: {}, // { uid: { amount, method, confirmed } }
+        payments: {},
         myPortion: form.split==='manual' ? (parseFloat(form.myPortion)||0) : null,
         fullyPaid: false,
       });
@@ -277,19 +292,42 @@ function UploadForm({ profile, users }) {
   );
 }
 
+/* ─── RECEIPT ITEM ─────────────────────────────────────────────────────────── */
 function ReceiptItem({ r, users, profile, isAdmin, onEdit, onLogPayment }) {
   const iOwn = r.by === profile?.uid;
   const iAmTagged = r.whoIds?.includes(profile?.uid) && !iOwn;
   const others = (r.whoIds||[]).filter(uid => uid !== r.by);
   const whoUsers = users.filter(u => r.whoIds?.includes(u.uid));
 
-  // Money math
   const evenShare = r.split==='even' && r.whoIds?.length ? r.amt / r.whoIds.length : null;
-  const confirmedTotal = others.reduce((s,uid) => s + (r.payments?.[uid]?.confirmed ? (r.payments[uid].amount||0) : 0), 0);
+
+  // Build grouped payment display:
+  // Each payment entry may have coveredUids — combine payer + covered into one row
+  const paymentRows = []; // { payers: [user], amount, method, confirmed, pending }
+  const handledUids = new Set();
+
+  others.forEach(uid => {
+    if (handledUids.has(uid)) return;
+    const p = r.payments?.[uid];
+    if (!p) { paymentRows.push({ payers: [users.find(u=>u.uid===uid)].filter(Boolean), amount: evenShare, method: null, confirmed: false, pending: false, nothing: true }); return; }
+    const covered = (p.coveredUids || []).map(cid => users.find(u=>u.uid===cid)).filter(Boolean);
+    const allPayers = [users.find(u=>u.uid===uid), ...covered].filter(Boolean);
+    covered.forEach(u => handledUids.add(u.uid));
+    handledUids.add(uid);
+    paymentRows.push({ payers: allPayers, amount: p.amount, method: p.method, confirmed: p.confirmed, pending: !p.confirmed, nothing: false, payerUid: uid, coveredUids: p.coveredUids||[] });
+  });
+
+  const confirmedTotal = paymentRows.filter(row=>row.confirmed).reduce((s,row)=>s+(row.amount||0),0);
   const uploaderPortion = r.split==='manual' ? (r.myPortion||0) : (evenShare||0);
   const owedToUploader = Math.max(0, (r.amt||0) - uploaderPortion);
   const remaining = Math.max(0, owedToUploader - confirmedTotal);
   const myPayment = r.payments?.[profile?.uid];
+
+  // Am I covered by someone else's payment?
+  const coveredByOther = others.some(uid => {
+    const p = r.payments?.[uid];
+    return p?.coveredUids?.includes(profile?.uid) && p?.confirmed;
+  });
 
   return (
     <div className={`receipt-item ${r.fullyPaid?'receipt-paid':''}`}>
@@ -302,7 +340,8 @@ function ReceiptItem({ r, users, profile, isAdmin, onEdit, onLogPayment }) {
         <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
           <div style={{fontWeight:'bold',fontSize:14}}>{r.desc}</div>
           {r.fullyPaid && <span className="badge badge-s">✓ Fully paid</span>}
-          {iAmTagged && !myPayment?.confirmed && !r.fullyPaid && <span className="notif-dot">You owe!</span>}
+          {iAmTagged && !myPayment?.confirmed && !coveredByOther && !r.fullyPaid && <span className="notif-dot">You owe!</span>}
+          {coveredByOther && <span className="badge badge-s">✓ Covered</span>}
         </div>
         <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>
           {money(r.amt)} total · {r.split==='even'?'even split':'manual split'} · by <b>{r.byName}</b> · {new Date(r.date).toLocaleDateString()}
@@ -321,35 +360,41 @@ function ReceiptItem({ r, users, profile, isAdmin, onEdit, onLogPayment }) {
           Remaining owed to {r.byName?.split(' ')[0]}: <b style={{color:remaining>0.01?'var(--coral)':'var(--sage)'}}>{money(remaining)}</b>
         </div>
 
-        {/* Per-person payment status */}
+        {/* Grouped payment rows */}
         <div style={{marginTop:6}}>
-          {others.map(uid => {
-            const u = users.find(x=>x.uid===uid);
-            const p = r.payments?.[uid];
-            if (!u) return null;
+          {paymentRows.map((row, idx) => {
+            const names = row.payers.map(u=>u.displayName?.split(' ')[0]).join(' & ');
             return (
-              <div key={uid} style={{fontSize:12,padding:'3px 0',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                <span>{u.avatar&&u.avatar!=='⭐'?u.avatar:'👤'} {u.displayName?.split(' ')[0]}:</span>
-                {p ? (
-                  <span style={{color:p.confirmed?'var(--sage)':'var(--gold)'}}>
-                    {p.confirmed ? '✓' : '⏳'} {money(p.amount)} via {p.method}{p.confirmed?' (confirmed)':' (pending confirmation)'}
-                  </span>
-                ) : (
-                  <span style={{color:'var(--muted)'}}>nothing logged yet</span>
-                )}
-                {/* Uploader confirms or logs on behalf */}
-                {iOwn && p && !p.confirmed && (
+              <div key={idx} style={{fontSize:12,padding:'4px 0',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'flex-start',gap:6,flexWrap:'wrap'}}>
+                <div style={{display:'flex',gap:2,alignItems:'center',flexShrink:0}}>
+                  {row.payers.map(u=><Avatar key={u.uid} user={u} size={18}/>)}
+                </div>
+                <div style={{flex:1}}>
+                  <span style={{fontWeight:'bold'}}>{names}:</span>{' '}
+                  {row.nothing ? (
+                    <span style={{color:'var(--muted)'}}>nothing logged yet — owes {evenShare!=null?money(evenShare):''}</span>
+                  ) : (
+                    <span style={{color:row.confirmed?'var(--sage)':'var(--gold)'}}>
+                      {row.confirmed?'✓':'⏳'} {money(row.amount)}{row.method?` via ${row.method}`:''}{row.confirmed?' (confirmed)':' (pending confirmation)'}
+                      {row.coveredUids?.length>0 && <span style={{color:'var(--muted)'}}> · covering {row.payers.slice(1).map(u=>u.displayName?.split(' ')[0]).join(' & ')}</span>}
+                    </span>
+                  )}
+                </div>
+                {/* Uploader confirms */}
+                {iOwn && !row.nothing && !row.confirmed && (
                   <button className="btn-mini" style={{fontSize:11,padding:'2px 8px'}}
-                    onClick={async()=>{try{await updateDoc(doc(db,'receipts',r.id),{[`payments.${uid}.confirmed`]:true})}catch{alert('Couldn\'t save — check connection.');}}}>
+                    onClick={async()=>{try{await updateDoc(doc(db,'receipts',r.id),{[`payments.${row.payerUid}.confirmed`]:true})}catch{alert('Couldn\'t save — check connection.');}}}>
                     Confirm received
                   </button>
                 )}
-                {iOwn && !p && (
+                {iOwn && row.nothing && (
                   <button className="btn-mini" style={{fontSize:11,padding:'2px 8px'}}
                     onClick={async()=>{
-                      const amt = parseFloat(window.prompt(`How much did ${u.displayName} pay you?`));
+                      const uid = row.payers[0]?.uid;
+                      if (!uid) return;
+                      const amt = parseFloat(window.prompt(`How much did ${row.payers[0]?.displayName} pay you?`));
                       if (isNaN(amt)) return;
-                      const method = window.prompt(`How? (${PAYMENT_METHODS.join(' / ')})`, 'Apple Pay') || 'Cash';
+                      const method = window.prompt(`How? (${PAYMENT_METHODS.join(' / ')})`, 'Cash') || 'Cash';
                       try{await updateDoc(doc(db,'receipts',r.id),{[`payments.${uid}`]:{amount:amt,method,confirmed:true,loggedBy:profile.uid}})}catch{alert('Couldn\'t save — check connection.');}
                     }}>
                     Log their payment
@@ -362,7 +407,7 @@ function ReceiptItem({ r, users, profile, isAdmin, onEdit, onLogPayment }) {
 
         {/* My actions */}
         <div className="btn-row" style={{marginTop:8}}>
-          {iAmTagged && !myPayment?.confirmed && (
+          {iAmTagged && !myPayment?.confirmed && !coveredByOther && (
             <button className="btn btn-secondary" style={{fontSize:12,padding:'6px 12px'}} onClick={onLogPayment}>
               {myPayment ? 'Update my payment' : `💸 Log my payment to ${r.byName?.split(' ')[0]}`}
             </button>
@@ -385,18 +430,62 @@ function ReceiptItem({ r, users, profile, isAdmin, onEdit, onLogPayment }) {
   );
 }
 
+/* ─── LOG PAYMENT MODAL ────────────────────────────────────────────────────── */
+// Deep link helpers
+function openVenmo(handle, amount, note) {
+  // venmo:// deep link — opens Venmo app with recipient, amount, note pre-filled
+  const clean = (handle||'').replace(/^@/,'');
+  if (!clean) { alert('This person hasn\'t set their Venmo handle yet — ask them to add it in Settings.'); return; }
+  const url = `venmo://paycharge?txn=pay&recipients=${encodeURIComponent(clean)}&amount=${amount.toFixed(2)}&note=${encodeURIComponent(note)}`;
+  window.location.href = url;
+}
+function openAppleCash(phone, amount, note) {
+  // Opens Messages app pre-filled — Apple Cash is sent right inside iMessage
+  if (!phone) { alert('This person hasn\'t set their phone number yet — ask them to add it in Settings.'); return; }
+  const digits = phone.replace(/\D/g,'');
+  const body = encodeURIComponent(`Sending you $${amount.toFixed(2)} via Apple Cash for: ${note} 💸`);
+  window.location.href = `sms:${digits}&body=${body}`;
+}
+
 function LogPaymentModal({ r, profile, users, onClose }) {
   const evenShare = r.split==='even' && r.whoIds?.length ? r.amt/r.whoIds.length : null;
   const existing = r.payments?.[profile?.uid];
+
   const [amount, setAmount] = useState(existing?.amount ?? (evenShare!=null ? evenShare.toFixed(2) : ''));
   const [method, setMethod] = useState(existing?.method || (r.payMethods?.[0] || PAYMENT_METHODS[0]));
+
+  // ── NEW: pay for others ──
+  // Other tagged people (not the uploader, not me) who haven't paid yet
+  const otherTagged = (r.whoIds||[]).filter(uid =>
+    uid !== r.by &&
+    uid !== profile?.uid &&
+    !r.payments?.[uid]?.confirmed
+  );
+  const [coveringUids, setCoveringUids] = useState([]);
+  function toggleCover(uid) {
+    setCoveringUids(prev => prev.includes(uid) ? prev.filter(x=>x!==uid) : [...prev, uid]);
+  }
+
+  // Total = my share + shares of anyone I'm covering
+  const myShare = evenShare ?? parseFloat(amount) ?? 0;
+  const coveredShareEach = evenShare ?? 0;
+  const totalToPay = parseFloat(amount||0) + coveringUids.length * coveredShareEach;
+
+  // Uploader's contact info for deep links
+  const uploader = users.find(u => u.uid === r.by);
 
   async function submit() {
     const amt = parseFloat(amount);
     if (isNaN(amt) || amt <= 0) { alert('Enter how much you\'re sending'); return; }
     try {
       await updateDoc(doc(db,'receipts',r.id), {
-        [`payments.${profile.uid}`]: { amount: amt, method, confirmed: false, at: new Date().toISOString() }
+        [`payments.${profile.uid}`]: {
+          amount: totalToPay,
+          method,
+          confirmed: false,
+          coveredUids: coveringUids,   // ← NEW: UIDs this person is paying for
+          at: new Date().toISOString(),
+        }
       });
       onClose();
     } catch {
@@ -404,26 +493,102 @@ function LogPaymentModal({ r, profile, users, onClose }) {
     }
   }
 
+  const desc = r.desc || 'JBBCE expenses';
+
   return (
-    <Modal title={`Pay ${r.byName?.split(' ')[0]} back — ${r.desc}`} onClose={onClose}>
-      {evenShare!=null && <div className="tip-box" style={{marginBottom:10}}>Your share of this even split: <b>{money(evenShare)}</b></div>}
-      {r.split==='manual' && <div className="tip-box" style={{marginBottom:10}}>Manual split — enter the portion of the bill that was yours.</div>}
-      <div className="form-group"><label>Amount I'm sending ($)</label>
+    <Modal title={`Pay ${uploader?.displayName?.split(' ')[0] || r.byName?.split(' ')[0]} back — ${desc}`} onClose={onClose}>
+      {evenShare!=null && (
+        <div className="tip-box" style={{marginBottom:10}}>
+          Your share of this even split: <b>{money(evenShare)}</b>
+        </div>
+      )}
+      {r.split==='manual' && (
+        <div className="tip-box" style={{marginBottom:10}}>
+          Manual split — enter the portion of the bill that was yours.
+        </div>
+      )}
+
+      <div className="form-group">
+        <label>Amount I'm sending ($)</label>
         <input type="number" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} autoFocus />
       </div>
-      <div className="form-group"><label>How I'm sending it</label>
+
+      {/* ── NEW: pay for others ── */}
+      {otherTagged.length > 0 && (
+        <div className="form-group">
+          <label>Also paying for…</label>
+          <div style={{fontSize:12,color:'var(--muted)',marginBottom:6}}>
+            Select anyone you're covering — their share will be added to your total and they'll be marked as paid.
+          </div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {otherTagged.map(uid => {
+              const u = users.find(x=>x.uid===uid);
+              if (!u) return null;
+              const isCovering = coveringUids.includes(uid);
+              return (
+                <div key={uid} className={`check-pill ${isCovering?'sel':''}`} onClick={()=>toggleCover(uid)}>
+                  <Avatar user={u} size={18} /> {u.displayName?.split(' ')[0]}
+                  {evenShare!=null && <span style={{fontSize:11,color:'var(--muted)',marginLeft:3}}>+{money(evenShare)}</span>}
+                </div>
+              );
+            })}
+          </div>
+          {coveringUids.length > 0 && (
+            <div style={{fontSize:13,marginTop:8,fontWeight:'bold',color:'var(--ocean)'}}>
+              Total you're sending: {money(totalToPay)}
+              <span style={{fontSize:11,fontWeight:'normal',color:'var(--muted)',marginLeft:6}}>
+                (your {money(myShare)} + {coveringUids.length} × {money(coveredShareEach)})
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="form-group">
+        <label>How I'm sending it</label>
         <select value={method} onChange={e=>setMethod(e.target.value)}>
           {(r.payMethods?.length ? r.payMethods : PAYMENT_METHODS).map(m=><option key={m}>{m}</option>)}
         </select>
       </div>
+
+      {/* ── NEW: deep link pay buttons ── */}
+      {(method === 'Venmo' || method === 'Apple Cash') && (
+        <div style={{marginBottom:12,padding:'10px 12px',background:'var(--ol)',borderRadius:8,border:'1px solid var(--om)'}}>
+          <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>
+            Open the app to send payment — then come back and tap "Log payment" below so {uploader?.displayName?.split(' ')[0]} knows it's on the way.
+          </div>
+          {method === 'Venmo' && (
+            <button className="btn btn-primary" style={{fontSize:13,background:'#3D95CE'}}
+              onClick={()=>openVenmo(uploader?.venmoHandle, totalToPay, desc)}>
+              Open Venmo → Pay {uploader?.displayName?.split(' ')[0]} {money(totalToPay)}
+            </button>
+          )}
+          {method === 'Apple Cash' && (
+            <button className="btn btn-primary" style={{fontSize:13,background:'#34C759'}}
+              onClick={()=>openAppleCash(uploader?.phone, totalToPay, desc)}>
+              Open Messages → Send Apple Cash {money(totalToPay)}
+            </button>
+          )}
+          {method === 'Venmo' && !uploader?.venmoHandle && (
+            <div style={{fontSize:11,color:'var(--coral)',marginTop:6}}>⚠️ {uploader?.displayName?.split(' ')[0]} hasn't set their Venmo handle yet — ask them to add it in ⚙️ Settings.</div>
+          )}
+          {method === 'Apple Cash' && !uploader?.phone && (
+            <div style={{fontSize:11,color:'var(--coral)',marginTop:6}}>⚠️ {uploader?.displayName?.split(' ')[0]} hasn't set their phone number yet — ask them to add it in ⚙️ Settings.</div>
+          )}
+        </div>
+      )}
+
       <div className="btn-row">
-        <button className="btn btn-primary" onClick={submit}>Send for {r.byName?.split(' ')[0]}'s confirmation</button>
+        <button className="btn btn-primary" onClick={submit}>
+          Log payment ({money(totalToPay)}) for {uploader?.displayName?.split(' ')[0]}'s confirmation
+        </button>
         <button className="btn-mini" onClick={onClose}>Cancel</button>
       </div>
     </Modal>
   );
 }
 
+/* ─── EDIT RECEIPT MODAL (unchanged) ──────────────────────────────────────── */
 function EditReceiptModal({ r, users, onClose }) {
   const [form, setForm] = useState({
     desc: r.desc||'', amt: String(r.amt||''), split: r.split||'even',
